@@ -17,6 +17,91 @@ use std::{
     sync::Mutex,
 };
 
+pub(crate) fn open_sarc_local(file: String, folder: String) -> Result<Value> {
+    // Read
+    let data = fs::read(file).map_err(|_| AppError::from("Failed to read file"))?;
+    let data = util::decompress_if(&data);
+    let data = data.to_vec();
+
+    // Parse
+    let sarc: Sarc = Sarc::new::<Vec<u8>>(data.into()).map_err(|_| AppError::from("Could not read SARC"))?;
+    let hash_table = StockHashTable::new(&match sarc.endian() {
+        Endian::Big => Platform::WiiU,
+        Endian::Little => Platform::Switch,
+    });
+    let (tree, modified) = create_tree(&sarc, &hash_table)
+        .map_err(|e| AppError::from(format!("Failed to make tree: {:?}", e)))?;
+    let res = json!({
+        "modded": modified,
+        "sarc": Value::Object(tree),
+        "be": matches!(sarc.endian(), Endian::Big)
+    });
+    
+    let folder = PathBuf::from(folder);
+    sarc
+        .files()
+        .try_for_each(|file| -> Result<()> {
+            let dest = folder.join(file.name().unwrap());
+            fs::create_dir_all(dest.parent().unwrap())
+                .map_err(|_| AppError::from("Failed to create folder"))?;
+            fs::write(folder.join(file.name().unwrap()), file.data())
+                .map_err(|e| AppError::from(format!("Failed to write file: {:?}", e)))?;
+            Ok(())
+        });
+
+   Ok(res)
+}
+
+// TODO: Find a way to do it without the original?
+pub(crate) fn compress_sarc_local(original: String, folder: String, out: String) -> Result<Value>  {
+  let data = fs::read(original).map_err(|_| AppError::from("Failed to read file"))?;
+  let data = util::decompress_if(&data);
+  let data = data.to_vec();
+
+  let sarc: Sarc = Sarc::new::<Vec<u8>>(data.into()).map_err(|_| AppError::from("Could not read SARC"))?;
+  let hash_table = StockHashTable::new(&match sarc.endian() {
+      Endian::Big => Platform::WiiU,
+      Endian::Little => Platform::Switch,
+  });
+  let (tree, modified) = create_tree(&sarc, &hash_table)
+      .map_err(|e| AppError::from(format!("Failed to make tree: {:?}", e)))?;
+  let res = json!({
+      "modded": modified,
+      "sarc": Value::Object(tree),
+      "be": matches!(sarc.endian(), Endian::Big)
+  });
+
+  // update_folder
+  let folder = PathBuf::from(&folder);
+  let mut new_sarc = SarcWriter::from(&sarc);
+  glob::glob(folder.join("**/*.*").as_os_str().to_str().unwrap())
+        .unwrap()
+        .filter_map(|f| f.ok())
+        .try_for_each(|file| -> Result<()> {
+            let path = file.strip_prefix(&folder).unwrap();
+            let data = fs::read(&file).map_err(|_| AppError::from("Failed to read file"))?;
+            new_sarc.add_file(&path.to_str().unwrap().replace('\\', "/"), data);
+            Ok(())
+        })?;
+  let sarc: Sarc = Sarc::new::<Vec<u8>>(new_sarc.to_binary().into()).map_err(|_| AppError::from("Could not read SARC"))?;
+
+  // Save_sarc
+  let out = PathBuf::from(out);
+  let mut writer = SarcWriter::from(&sarc);
+  let data = writer.to_binary();
+  fs::write(&out, {
+      if util::should_compress(&out) {
+          util::compress(&data)
+      } else {
+          data
+      }
+  })
+  .map_err(|_| AppError::from("Failed to write SARC file"))?;
+
+
+  Ok(res)
+}
+
 fn create_tree(
     sarc: &Sarc,
     hash_table: &StockHashTable,

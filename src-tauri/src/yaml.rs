@@ -1,4 +1,5 @@
 use std::{fs, sync::Mutex};
+use std::io::Read;
 
 use msyt::Msyt;
 use once_cell::sync::Lazy;
@@ -8,6 +9,7 @@ use roead::{
     Endian,
 };
 use serde_json::{json, Value};
+use serde_yaml;
 
 use crate::{util, AppError, Result, State, Yaml, YamlDoc, YamlEndian};
 
@@ -19,6 +21,68 @@ fn init_name_table() {
         (0..10000).for_each(|i| table.add_name(format!("File{}", i)));
     }
 }
+
+pub(crate) fn open_yaml_local(file: String, out: String) -> Result<Value> {
+     let data = fs::read(file).map_err(|_| AppError::from("Failed to open file"))?;
+     let data = util::decompress_if(&data);
+     let data = data.to_vec();
+
+     let yaml = Yaml::from_binary(&data)?;
+     let y_type = match &yaml.doc {
+        YamlDoc::Aamp(_) => {
+            init_name_table();
+            "aamp"
+        }
+        YamlDoc::Byml(_) => "byml",
+        YamlDoc::Msbt(_) => "msbt",
+    };
+    let res = json!({
+        "yaml": yaml.to_text(),
+        "be": matches!(&yaml.endian, YamlEndian::Big),
+        "type": y_type
+    });
+
+    fs::write(&out, yaml.to_text()).map_err(|_| AppError::from("Failed to save file"))?;
+    Ok(res)
+}
+
+pub(crate) fn compress_yaml_local(original: String, file: String, out: String) -> Result<Value> {
+    let data = fs::read(original).map_err(|_| AppError::from("Failed to open file"))?;
+    let data = util::decompress_if(&data);
+    let data = data.to_vec();
+
+    let mut yaml = Yaml::from_binary(&data)?;
+     let y_type = match &yaml.doc {
+        YamlDoc::Aamp(_) => {
+            init_name_table();
+            "aamp"
+        }
+        YamlDoc::Byml(_) => "byml",
+        YamlDoc::Msbt(_) => "msbt",
+    };
+    let res = json!({
+        "yaml": yaml.to_text(),
+        "be": matches!(&yaml.endian, YamlEndian::Big),
+        "type": y_type
+    });
+
+    let mut file = fs::File::open(file).map_err(|_| AppError::from("Failed to open file"))?;
+    let mut new_data = String::new();
+    file.read_to_string(&mut new_data).map_err(|_| AppError::from("Failed to read file"))?;
+    yaml.update(&new_data)?;
+    let data = yaml.to_binary();
+    let data = roead::yaz0::compress_if(&data, &out);
+    if out.starts_with("SARC:") {
+        let path = out.trim_end_matches('/').trim_start_matches("SARC:");
+        let levels: Vec<&str> = path.split("//").collect();
+        let filename = *levels.last().unwrap();
+        Ok(json!({}))
+    } else {
+        fs::write(&out, &data).map_err(|_| AppError::from("Failed to save file"))?;
+        Ok(json!({}))
+    }
+}
+
 
 #[tauri::command(async)]
 pub(crate) fn open_yaml(state: State<'_>, file: String) -> Result<Value> {
